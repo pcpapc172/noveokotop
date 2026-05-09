@@ -2,6 +2,7 @@ package ir.hienob.noveo.desktop
 
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -44,7 +45,8 @@ fun main() = application {
         },
         title = "Noveo",
         state = rememberWindowState(size = DpSize(1200.dp, 800.dp)),
-        resizable = true
+        resizable = true,
+        icon = painterResource("icon.png")
     ) {
         val state by desktopState.state.collectAsState()
         val strings = coreNoveoStrings(state.root.languageCode)
@@ -431,12 +433,35 @@ private class DesktopStateHolder {
     }
 
     fun downloadFile(messageId: String) {
-        val attachmentUrl = _state.value.home.messages.firstOrNull { it.id == messageId }?.attachmentUrl.orEmpty()
+        val message = _state.value.home.messages.firstOrNull { it.id == messageId } ?: return
+        val attachmentUrl = message.attachmentUrl.orEmpty()
+        val attachmentName = message.attachmentName?.ifBlank { null }
         if (attachmentUrl.isBlank()) return
-        runCatching {
-            if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(URI(attachmentUrl))
-        }.onFailure { error ->
-            _state.value = _state.value.copy(home = _state.value.home.copy(error = error.message ?: "Unable to open file"))
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val downloadsDir = File(System.getProperty("user.home"), "Downloads/Noveo").also { it.mkdirs() }
+                val fileName = attachmentName ?: attachmentUrl.substringAfterLast('/').ifBlank { "noveo_file_${System.currentTimeMillis()}" }
+                val destFile = File(downloadsDir, fileName)
+                val url = java.net.URL(attachmentUrl)
+                url.openStream().use { input ->
+                    destFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    _state.value = _state.value.copy(home = _state.value.home.copy(
+                        error = "Saved to ${destFile.absolutePath}"
+                    ))
+                }
+                // Also open the folder so user can see it
+                if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(downloadsDir)
+            }.onFailure { error ->
+                withContext(Dispatchers.Main) {
+                    _state.value = _state.value.copy(home = _state.value.home.copy(
+                        error = error.message ?: "Download failed"
+                    ))
+                }
+            }
         }
     }
 

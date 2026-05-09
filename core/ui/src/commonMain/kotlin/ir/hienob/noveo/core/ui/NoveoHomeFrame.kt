@@ -136,7 +136,17 @@ import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -238,6 +248,7 @@ data class NoveoHomeChat(
     val time: String = "",
     val unreadCount: Int = 0,
     val avatarInitial: String = title.take(1).ifBlank { "N" },
+    val avatarUrl: String? = null,
     val isOnline: Boolean = false,
     val isVerified: Boolean = false,
     val canChat: Boolean = true,
@@ -282,7 +293,8 @@ data class NoveoHomeMessage(
     val botButtons: List<List<String>> = emptyList(),
     val dateLabel: String = "",
     val isPinned: Boolean = false,
-    val isSystem: Boolean = false
+    val isSystem: Boolean = false,
+    val senderAvatarUrl: String? = null
 )
 
 private data class TelegramHomeColors(
@@ -1508,7 +1520,7 @@ private fun AndroidStyleChatRow(chat: NoveoHomeChat, strings: NoveoStrings, sele
         )
     ) {
         Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            ProfileCircle(name = chatTitle, isSavedMessages = chatTitle == strings.savedMessages || chat.title == "Saved Messages")
+            ProfileCircle(name = chatTitle, isSavedMessages = chatTitle == strings.savedMessages || chat.title == "Saved Messages", imageUrl = chat.avatarUrl)
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1767,7 +1779,7 @@ private fun AndroidStyleConversationPane(
                     modifier = Modifier.weight(1f).padding(vertical = 4.dp, horizontal = 4.dp).clip(RoundedCornerShape(18.dp)).clickable(onClick = onOpenChatInfo),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ProfileCircle(name = chat.title, isSavedMessages = chat.title == strings.savedMessages || chat.title == "Saved Messages", size = 40.dp)
+                    ProfileCircle(name = chat.title, isSavedMessages = chat.title == strings.savedMessages || chat.title == "Saved Messages", size = 40.dp, imageUrl = chat.avatarUrl)
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2328,10 +2340,22 @@ private fun AndroidStyleMessageRow(
             .fillMaxWidth()
             .padding(top = if (showSenderInfo) 10.dp else 0.dp)
             .padding(bottom = if (hasTail) 6.dp else 0.dp)
+            .pointerInput(message.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.button == PointerButton.Secondary && event.changes.any { it.pressed }) {
+                            val pos = event.changes.first().position
+                            onOpenMenu(bubbleBounds)
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+            }
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClick = { /* Android parity: normal tap/click does not open message actions. */ },
+                onClick = { /* tap does nothing */ },
                 onLongClick = { onOpenMenu(bubbleBounds) }
             )
             .graphicsLayer {
@@ -2348,7 +2372,7 @@ private fun AndroidStyleMessageRow(
         Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
             if (!ownMessage && isGroupChat) {
                 if (hasTail) {
-                    ProfileCircle(name = message.senderName, size = 36.dp)
+                    ProfileCircle(name = message.senderName, size = 36.dp, imageUrl = message.senderAvatarUrl)
                 } else {
                     Spacer(Modifier.width(36.dp))
                 }
@@ -2446,11 +2470,10 @@ private fun AndroidStyleMessageRow(
                         }
 
                         if (message.text.isNotBlank()) {
-                            Text(
+                            NoveoMarkdownText(
                                 text = message.text,
                                 color = if (ownMessage) tgColors.outgoingText else tgColors.incomingText,
-                                fontSize = 16.sp,
-                                lineHeight = 20.sp,
+                                linkColor = if (ownMessage) tgColors.outgoingText.copy(alpha = 0.9f) else tgColors.incomingLink,
                                 modifier = Modifier.padding(horizontal = 4.dp)
                             )
                         }
@@ -2660,6 +2683,69 @@ private fun AndroidAttachmentChip(message: NoveoHomeMessage, ownMessage: Boolean
             }
         }
     }
+}
+
+@Composable
+private fun NoveoMarkdownText(
+    text: String,
+    color: Color,
+    linkColor: Color,
+    modifier: Modifier = Modifier
+) {
+    val hasBold = text.contains("**")
+    val hasCode = text.contains("`")
+    val hasHandle = text.contains('@')
+
+    if (!hasBold && !hasCode && !hasHandle) {
+        Text(text = text, color = color, fontSize = 16.sp, lineHeight = 20.sp, modifier = modifier)
+        return
+    }
+
+    val annotated = remember(text, color, linkColor) {
+        buildAnnotatedString {
+            var i = 0
+            while (i < text.length) {
+                when {
+                    text.startsWith("**", i) -> {
+                        val end = text.indexOf("**", i + 2)
+                        if (end != -1) {
+                            withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = color)) {
+                                append(text.substring(i + 2, end))
+                            }
+                            i = end + 2
+                        } else { append(text[i]); i++ }
+                    }
+                    text.startsWith("`", i) -> {
+                        val end = text.indexOf("`", i + 1)
+                        if (end != -1) {
+                            withStyle(SpanStyle(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                background = color.copy(alpha = 0.10f),
+                                color = color
+                            )) {
+                                append(text.substring(i + 1, end))
+                            }
+                            i = end + 1
+                        } else { append(text[i]); i++ }
+                    }
+                    text[i] == '@' -> {
+                        var end = i + 1
+                        while (end < text.length && (text[end].isLetterOrDigit() || text[end] == '_')) end++
+                        if (end > i + 1) {
+                            pushStringAnnotation("handle", text.substring(i, end))
+                            withStyle(SpanStyle(color = linkColor, fontWeight = FontWeight.SemiBold)) {
+                                append(text.substring(i, end))
+                            }
+                            pop()
+                            i = end
+                        } else { append(text[i]); i++ }
+                    }
+                    else -> { append(text[i]); i++ }
+                }
+            }
+        }
+    }
+    Text(text = annotated, fontSize = 16.sp, lineHeight = 20.sp, modifier = modifier)
 }
 
 private fun stringsFileLabel(type: String?): String = when {
@@ -3181,6 +3267,7 @@ private fun ProfileCircle(
     name: String,
     isSavedMessages: Boolean = false,
     size: androidx.compose.ui.unit.Dp = 40.dp,
+    imageUrl: String? = null,
     modifier: Modifier = Modifier
 ) {
     if (isSavedMessages) {
@@ -3203,8 +3290,12 @@ private fun ProfileCircle(
     Box(
         modifier = modifier
             .size(size)
-            .clip(CircleShape)
-            .background(
+            .clip(CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        // Fallback gradient + initial always rendered underneath
+        Box(
+            modifier = Modifier.fillMaxSize().background(
                 Brush.linearGradient(
                     colors = listOf(
                         MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
@@ -3212,9 +3303,22 @@ private fun ProfileCircle(
                     )
                 )
             ),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(name.firstOrNull()?.uppercase() ?: "N", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            contentAlignment = Alignment.Center
+        ) {
+            Text(name.firstOrNull()?.uppercase() ?: "N", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        }
+        // Real photo on top if available
+        if (!imageUrl.isNullOrBlank()) {
+            val ctx = LocalPlatformContext.current
+            AsyncImage(
+                model = ImageRequest.Builder(ctx)
+                    .data(imageUrl)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = name,
+                modifier = Modifier.fillMaxSize().clip(CircleShape)
+            )
+        }
     }
 }
 

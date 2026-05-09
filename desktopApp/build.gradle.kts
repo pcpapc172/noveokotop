@@ -21,10 +21,13 @@ compose.desktop {
         nativeDistributions {
             targetFormats(
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
             )
             packageName = "Noveo"
             packageVersion = desktopPackageVersion
+            linux { iconFile.set(project.file("src/main/resources/icon.png")) }
+            windows { iconFile.set(project.file("src/main/resources/icon.png")) }
         }
         buildTypes.release.proguard {
             configurationFiles.from(project.file("proguard-rules.pro"))

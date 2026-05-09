@@ -1,0 +1,6 @@
+<resources>
+    <plurals name="members_count">
+        <item quantity="one">%d member</item>
+        <item quantity="other">%d members</item>
+    </plurals>
+</resources>

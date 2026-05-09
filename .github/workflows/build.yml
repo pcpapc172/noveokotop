@@ -1,4 +1,4 @@
-name: Android Build And Deliver
+name: Desktop Build
 
 on:
   push:
@@ -7,727 +7,85 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: android-build-${{ github.ref }}
+  group: desktop-build-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  metadata:
-    name: Release metadata
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.release_meta.outputs.version }}
-      version_code: ${{ steps.release_meta.outputs.version_code }}
-      tag: ${{ steps.release_meta.outputs.tag }}
-      prerelease: ${{ steps.release_meta.outputs.prerelease }}
-      release_name: ${{ steps.release_meta.outputs.release_name }}
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
+          distribution: temurin
+          java-version: "17"
 
-      - name: Derive release metadata
-        id: release_meta
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install WiX Toolset
+        run: choco install wixtoolset -y
+
+      - name: Generate Gradle wrapper
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-          import re
-          import urllib.request
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
+          gradle wrapper --gradle-version 8.14.4
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ["GITHUB_TOKEN"]
-          gradle_text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
-
-          version_match = re.search(r'appVersionName\s*=\s*providers\.gradleProperty\("NOVEO_VERSION_NAME"\)\.orNull \?: "([^"]+)"', gradle_text)
-          if not version_match:
-              version_match = re.search(r'versionName\s*=\s*"([^"]+)"', gradle_text)
-          if not version_match:
-              raise SystemExit("Could not find base versionName in app/build.gradle.kts")
-
-          version_code_match = re.search(r'appVersionCode\s*=\s*providers\.gradleProperty\("NOVEO_VERSION_CODE"\)\.orNull\?\.toIntOrNull\(\) \?: (\d+)', gradle_text)
-          if not version_code_match:
-              version_code_match = re.search(r'versionCode\s*=\s*(\d+)', gradle_text)
-          if not version_code_match:
-              raise SystemExit("Could not find base versionCode in app/build.gradle.kts")
-
-          base_version = version_match.group(1).strip()
-          base_version_code = int(version_code_match.group(1))
-
-          latest_release_tag = ""
-          latest_stable_tag = ""
-          try:
-              req = urllib.request.Request(
-                  f"https://api.github.com/repos/{repo}/releases?per_page=100",
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                  },
-              )
-              with urllib.request.urlopen(req) as resp:
-                  releases = json.load(resp)
-              for release in releases:
-                  if release.get("draft"):
-                      continue
-                  if not latest_release_tag:
-                      latest_release_tag = (release.get("tag_name") or "").strip()
-                  if release.get("prerelease"):
-                      continue
-                  tag_name = (release.get("tag_name") or "").strip()
-                  if re.fullmatch(r"\d+\.\d+\.\d+", tag_name):
-                      latest_stable_tag = tag_name
-                      break
-          except Exception:
-              pass
-
-          is_prerelease = base_version == latest_stable_tag
-          if is_prerelease:
-              stamp = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%-m%d%H%M")
-              effective_version = f"{base_version}.{stamp}"
-              version_code = int(stamp)
-              tag = f"{base_version}-{stamp}"
-              prerelease = "true"
-              release_name = f"Noveo {tag}"
-          else:
-              effective_version = base_version
-              version_code = base_version_code
-              tag = base_version
-              prerelease = "false"
-              release_name = f"Noveo {base_version}"
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"version={effective_version}\n")
-              fh.write(f"version_code={version_code}\n")
-              fh.write(f"tag={tag}\n")
-              fh.write(f"prerelease={prerelease}\n")
-              fh.write(f"release_name={release_name}\n")
-              fh.write(f"latest_release_tag={latest_release_tag}\n")
-          PY
-
-      - name: Groq Diffgen
-        id: changelog
+      - name: Make gradlew executable
         shell: bash
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
-          RELEASE_PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
-          PREVIOUS_RELEASE_TAG: ${{ steps.release_meta.outputs.latest_release_tag }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: chmod +x ./gradlew
+
+      - name: Build Windows package
+        shell: bash
         run: |
-          set -euo pipefail
-          PREV_TAG="${PREVIOUS_RELEASE_TAG}"
-          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG^{commit}" >/dev/null 2>&1; then
-            RANGE="${PREV_TAG}..${GITHUB_SHA}"
-            PREV_LABEL="$PREV_TAG"
-          elif git rev-parse "${GITHUB_SHA}^" >/dev/null 2>&1; then
-            RANGE="${GITHUB_SHA}^..${GITHUB_SHA}"
-            PREV_LABEL="${GITHUB_SHA}^"
-          else
-            RANGE="${GITHUB_SHA}"
-            PREV_LABEL="initial build"
-          fi
+          ./gradlew :desktopApp:packageExe \
+            -PNOVEO_DESKTOP_PACKAGE_VERSION=1.0.${{ github.run_number }}
 
-          {
-            echo "release_tag=${RELEASE_TAG}"
-            echo "previous_label=${PREV_LABEL}"
-            echo "range=${RANGE}"
-          } >> "$GITHUB_OUTPUT"
+      - name: List generated files
+        shell: bash
+        run: |
+          find desktopApp/build -type f | grep -Ei '\.(exe|msi)$' || true
 
-          git log --no-merges --pretty=format:'- %s (%h)' "$RANGE" > commits.txt || true
-          git diff --name-status "$RANGE" > files.txt || true
-          export PREV_LABEL RANGE
-          python3 -m pip install --disable-pip-version-check --quiet groq
-
-          python3 - <<'PY'
-          import os
-          import pathlib
-          import sys
-          import textwrap
-          from groq import Groq
-
-          release_tag = os.environ["RELEASE_TAG"]
-          release_version = os.environ["RELEASE_VERSION"]
-          prerelease = os.environ["RELEASE_PRERELEASE"] == "true"
-          previous_label = os.environ["PREV_LABEL"]
-          range_text = os.environ["RANGE"]
-          api_key = os.environ.get("GROQ_API_KEY", "").strip()
-
-          commits = pathlib.Path("commits.txt").read_text(encoding="utf-8", errors="ignore").strip()
-          files_changed = pathlib.Path("files.txt").read_text(encoding="utf-8", errors="ignore").strip()
-          if not commits:
-              commits = "- No commit messages available"
-          if not files_changed:
-              files_changed = "No file-level diff available"
-
-          fallback = textwrap.dedent(f"""\
-          Release {release_tag}
-
-          Diff since {previous_label}.
-
-          Commits:
-          {commits}
-
-          Files changed:
-          {files_changed}
-          """).strip()
-
-          if not api_key:
-              body = fallback
-          else:
-              system_prompt = (
-                  "You write concise software release notes for Android builds. "
-                  "Return plain Markdown only. Be factual, do not invent behavior, "
-                  "and summarize only what is supported by the provided diff. "
-                  "Keep the result under 900 characters so the exact same text can be reused "
-                  "for GitHub Releases and message captions."
-              )
-              user_prompt = textwrap.dedent(f"""\
-              Build type: {"pre-release" if prerelease else "release"}
-              New release tag: {release_tag}
-              App versionName: {release_version}
-              Diff range: {range_text}
-              Previous successful release: {previous_label}
-
-              Commit summaries:
-              {commits}
-
-              File diff:
-              {files_changed}
-
-              Write a compact changelog with:
-              - a one-line headline
-              - 2 to 5 short bullets
-              - no hype
-              - no unsupported claims
-              """)
-              try:
-                  client = Groq(api_key=api_key)
-                  completion = client.chat.completions.create(
-                      model="openai/gpt-oss-120b",
-                      reasoning_effort="medium",
-                      messages=[
-                          {"role": "system", "content": system_prompt},
-                          {"role": "user", "content": user_prompt},
-                      ],
-                  )
-                  body = (completion.choices[0].message.content or "").strip()
-                  if not body:
-                      raise RuntimeError("Groq returned an empty changelog response")
-              except Exception as exc:
-                  print(f"Groq diffgen failed: {exc}", file=sys.stderr)
-                  raise
-
-          pathlib.Path("release-notes.md").write_text(body + "\n", encoding="utf-8")
-          pathlib.Path("release-caption.txt").write_text(body[:900], encoding="utf-8")
-          PY
-
-      - name: Upload release metadata files
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-metadata
+          name: noveo-windows
           path: |
-            release-notes.md
-            release-caption.txt
+            desktopApp/build/compose/binaries/main/exe/**/*.exe
+            desktopApp/build/compose/binaries/main/msi/**/*.msi
           if-no-files-found: error
 
-  build_minified:
-    name: Build minified APKs
+  release:
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs:
-      - metadata
-    env:
-      APK_FOLDER: app/build/outputs/apk/release
-      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+    needs: build-windows
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Gradle wrapper JAR
-        shell: bash
-        run: |
-          mkdir -p gradle/wrapper
-          curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.14.4/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-home-cache-cleanup: true
-          cache-read-only: false
-
-      - name: Prepare Gradle command
-        id: gradle_cmd
-        shell: bash
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
-          else
-            echo "cmd=gradle" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Configure minified split APKs
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import pathlib
-          import re
-
-          path = pathlib.Path("app/build.gradle.kts")
-          text = path.read_text(encoding="utf-8")
-          # ABI splits and ndk.abiFilters cannot be used together.
-          # Remove the repo's abiFilters only in this temporary CI checkout.
-          text = re.sub(
-              r'\n\s*abiFilters \+= listOf\([^)]+\)',
-              '',
-              text,
-          )
-
-          if "splits {" not in text:
-              splits = """
-              splits {
-                  abi {
-                      isEnable = true
-                      reset()
-                      include("arm64-v8a", "armeabi-v7a", "x86_64")
-                      isUniversalApk = true
-                  }
-              }
-
-          """
-              text = text.replace("    signingConfigs {", splits + "    signingConfigs {", 1)
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Build minified split APKs
-        shell: bash
-        run: |
-          set -o pipefail
-          "${{ steps.gradle_cmd.outputs.cmd }}" \
-            --build-cache \
-            --configuration-cache \
-            -PNOVEO_VERSION_NAME="${{ needs.metadata.outputs.version }}" \
-            -PNOVEO_VERSION_CODE="${{ needs.metadata.outputs.version_code }}" \
-            assembleRelease \
-            -x lintVitalRelease \
-            -x lintVitalReportRelease 2>&1 | tee build.log
-
-      - name: Collect minified APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          shopt -s nullglob
-
-          for apk in "$APK_FOLDER"/*.apk; do
-            name="$(basename "$apk")"
-            case "$name" in
-              *universal*|app-release.apk)
-                out="noveo-${RELEASE_TAG}.apk"
-                ;;
-              *arm64-v8a*)
-                out="noveo-${RELEASE_TAG}-arm64-v8a-minified.apk"
-                ;;
-              *armeabi-v7a*)
-                out="noveo-${RELEASE_TAG}-armeabi-v7a-minified.apk"
-                ;;
-              *x86_64*)
-                out="noveo-${RELEASE_TAG}-x86_64-minified.apk"
-                ;;
-              *)
-                echo "Skipping unknown APK output: $name"
-                continue
-                ;;
-            esac
-            cp "$apk" "dist/$out"
-          done
-
-          ls -lh dist
-          test -f "dist/noveo-${RELEASE_TAG}.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-arm64-v8a-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-armeabi-v7a-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-x86_64-minified.apk"
-
-      - name: Upload minified APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: minified-apks
-          path: dist/*.apk
-          if-no-files-found: error
-
-      - name: Upload minified build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: minified-build-log-${{ github.run_number }}
-          path: build.log
-          if-no-files-found: ignore
-
-  build_not_minified:
-    name: Build not-minified ABI APKs
-    runs-on: ubuntu-latest
-    needs:
-      - metadata
-    env:
-      APK_FOLDER: app/build/outputs/apk/release
-      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Gradle wrapper JAR
-        shell: bash
-        run: |
-          mkdir -p gradle/wrapper
-          curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.14.4/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-home-cache-cleanup: true
-          cache-read-only: false
-
-      - name: Prepare Gradle command
-        id: gradle_cmd
-        shell: bash
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
-          else
-            echo "cmd=gradle" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Configure not-minified split APKs
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import pathlib
-          import re
-
-          path = pathlib.Path("app/build.gradle.kts")
-          text = path.read_text(encoding="utf-8")
-          # ABI splits and ndk.abiFilters cannot be used together.
-          # Remove the repo's abiFilters only in this temporary CI checkout.
-          text = re.sub(
-              r'\n\s*abiFilters \+= listOf\([^)]+\)',
-              '',
-              text,
-          )
-
-          text = text.replace("isMinifyEnabled = true", "isMinifyEnabled = false", 1)
-          text = text.replace("isShrinkResources = true", "isShrinkResources = false", 1)
-
-          if "splits {" not in text:
-              splits = """
-              splits {
-                  abi {
-                      isEnable = true
-                      reset()
-                      include("arm64-v8a", "armeabi-v7a", "x86_64")
-                      isUniversalApk = false
-                  }
-              }
-
-          """
-              text = text.replace("    signingConfigs {", splits + "    signingConfigs {", 1)
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Build not-minified ABI APKs
-        shell: bash
-        run: |
-          set -o pipefail
-          "${{ steps.gradle_cmd.outputs.cmd }}" \
-            --build-cache \
-            --configuration-cache \
-            -PNOVEO_VERSION_NAME="${{ needs.metadata.outputs.version }}" \
-            -PNOVEO_VERSION_CODE="${{ needs.metadata.outputs.version_code }}" \
-            assembleRelease \
-            -x lintVitalRelease \
-            -x lintVitalReportRelease 2>&1 | tee build.log
-
-      - name: Collect not-minified APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          shopt -s nullglob
-
-          for apk in "$APK_FOLDER"/*.apk; do
-            name="$(basename "$apk")"
-            case "$name" in
-              *arm64-v8a*)
-                out="noveo-${RELEASE_TAG}-arm64-v8a-not-minified.apk"
-                ;;
-              *armeabi-v7a*)
-                out="noveo-${RELEASE_TAG}-armeabi-v7a-not-minified.apk"
-                ;;
-              *x86_64*)
-                out="noveo-${RELEASE_TAG}-x86_64-not-minified.apk"
-                ;;
-              *)
-                echo "Skipping unknown APK output: $name"
-                continue
-                ;;
-            esac
-            cp "$apk" "dist/$out"
-          done
-
-          ls -lh dist
-          test -f "dist/noveo-${RELEASE_TAG}-arm64-v8a-not-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-armeabi-v7a-not-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-x86_64-not-minified.apk"
-
-      - name: Upload not-minified APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: not-minified-apks
-          path: dist/*.apk
-          if-no-files-found: error
-
-      - name: Upload not-minified build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: not-minified-build-log-${{ github.run_number }}
-          path: build.log
-          if-no-files-found: ignore
-
-  vital_lint:
-    name: Vital release lint
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Gradle wrapper JAR
-        shell: bash
-        run: |
-          mkdir -p gradle/wrapper
-          curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.14.4/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-home-cache-cleanup: true
-          cache-read-only: false
-
-      - name: Prepare Gradle command
-        id: gradle_cmd
-        shell: bash
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
-          else
-            echo "cmd=gradle" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run vital release lint separately
-        shell: bash
-        run: |
-          "${{ steps.gradle_cmd.outputs.cmd }}" \
-            --build-cache \
-            --configuration-cache \
-            lintVitalRelease
-
-  publish:
-    name: Publish APKs
-    runs-on: ubuntu-latest
-    needs:
-      - metadata
-      - build_minified
-      - build_not_minified
-    env:
-      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
-
-    steps:
-      - name: Set up Android SDK for signing
-        uses: android-actions/setup-android@v3
-
-      - name: Download APK artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-apks"
           path: dist
           merge-multiple: true
 
-      - name: Download release metadata files
-        uses: actions/download-artifact@v4
-        with:
-          name: release-metadata
-          path: .
+      - name: List release files
+        run: ls -lh dist/
 
-      - name: List APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -lh dist
-          test -f "dist/noveo-${RELEASE_TAG}.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-arm64-v8a-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-armeabi-v7a-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-x86_64-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-arm64-v8a-not-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-armeabi-v7a-not-minified.apk"
-          test -f "dist/noveo-${RELEASE_TAG}-x86_64-not-minified.apk"
-
-      - name: Sign APKs
-        shell: bash
-        env:
-          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
-          SIGN_KEYSTORE_PASSWORD: ${{ secrets.SIGN_KEYSTORE_PASSWORD }}
-          SIGN_KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
-          SIGN_KEY_PASSWORD: ${{ secrets.SIGN_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGN_KEYSTORE_BASE64}" ]; then
-            echo "SIGN_KEYSTORE_BASE64 is empty, keeping Gradle-produced APK signatures."
-            exit 0
-          fi
-
-          echo "$SIGN_KEYSTORE_BASE64" | base64 -d > release.keystore
-          BUILD_TOOLS_DIR="$(ls -d "${ANDROID_SDK_ROOT}"/build-tools/* | sort -V | tail -n 1)"
-          APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
-          ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
-
-          shopt -s nullglob
-          for apk in dist/*.apk; do
-            aligned="${apk%.apk}-aligned.apk"
-            signed="${apk%.apk}-signed.apk"
-            "$ZIPALIGN" -f -v 4 "$apk" "$aligned"
-            "$APKSIGNER" sign \
-              --ks release.keystore \
-              --ks-pass pass:"$SIGN_KEYSTORE_PASSWORD" \
-              --ks-key-alias "$SIGN_KEY_ALIAS" \
-              --key-pass pass:"$SIGN_KEY_PASSWORD" \
-              --out "$signed" "$aligned"
-            mv "$signed" "$apk"
-            rm -f "$aligned"
-          done
-
-      - name: Upload all APKs as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-apks
-          path: dist/*.apk
-          if-no-files-found: error
-
-      - name: Publish GitHub release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.metadata.outputs.tag }}
-          name: ${{ needs.metadata.outputs.release_name }}
-          prerelease: ${{ needs.metadata.outputs.prerelease == 'true' }}
-          body_path: release-notes.md
-          files: |
-            dist/*.apk
+          tag_name: desktop-${{ github.run_number }}
+          name: "Noveo Desktop Build ${{ github.run_number }}"
+          prerelease: true
+          body: |
+            Automated desktop build
 
-      - name: Create high-compression delivery ZIPs
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p delivery
-
-          UNIVERSAL_APK="dist/noveo-${RELEASE_TAG}.apk"
-          ARM64_APK="dist/noveo-${RELEASE_TAG}-arm64-v8a-minified.apk"
-
-          test -f "$UNIVERSAL_APK"
-          test -f "$ARM64_APK"
-
-          # APK files are already compressed internally, so this may not reduce size much,
-          # but -9 gives the highest ZIP compression level for delivery packages.
-          zip -9 -j "delivery/noveo-${RELEASE_TAG}.zip" "$UNIVERSAL_APK"
-          zip -9 -j "delivery/noveo-${RELEASE_TAG}-arm64-v8a-minified.zip" "$ARM64_APK"
-
-          ls -lh delivery
-
-      - name: Send universal and arm64 ZIPs to Telegram as one message
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.CHANNEL_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; then
-            echo "Telegram delivery is not configured, skipping."
-            exit 0
-          fi
-
-          UNIVERSAL_ZIP="delivery/noveo-${RELEASE_TAG}.zip"
-          ARM64_ZIP="delivery/noveo-${RELEASE_TAG}-arm64-v8a-minified.zip"
-          test -f "$UNIVERSAL_ZIP"
-          test -f "$ARM64_ZIP"
-
-          python3 - <<'PY'
-          import json
-          import pathlib
-
-          caption = pathlib.Path("release-caption.txt").read_text(encoding="utf-8", errors="ignore")[:900]
-          media = [
-              {
-                  "type": "document",
-                  "media": "attach://universal",
-                  "caption": caption,
-              },
-              {
-                  "type": "document",
-                  "media": "attach://arm64",
-              },
-          ]
-          pathlib.Path("telegram-media.json").write_text(json.dumps(media), encoding="utf-8")
-          PY
-
-          curl --fail --silent --show-error \
-            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup" \
-            -F "chat_id=${TELEGRAM_CHAT_ID}" \
-            -F "media=$(cat telegram-media.json)" \
-            -F "universal=@${UNIVERSAL_ZIP};filename=$(basename "$UNIVERSAL_ZIP")" \
-            -F "arm64=@${ARM64_ZIP};filename=$(basename "$ARM64_ZIP")"
+            Commit: ${{ github.sha }}
+          files: dist/*
